@@ -22,6 +22,10 @@
             </div>-->
 		</div>
 		<div id="content">
+			<label>
+				<input type="checkbox" v-model="gridPresent" />
+				{{ gridPresent ? 'Destroy' : 'Create' }} Grid
+			</label>
 			<button @click="decreaseWidth">Decrease Width</button>
 			<button @click="increaseWidth">Increase Width</button>
 			<button @click="addItem">Add an item</button>
@@ -34,6 +38,7 @@
 				Row Height: <input type="number" v-model="rowHeight" /> Col nums: <input type="number" v-model="colNum" />
 			</div>
 			<grid-layout
+				v-if="gridPresent"
 				:layout.sync="layout"
 				:col-num="parseInt(colNum)"
 				:row-height="rowHeight"
@@ -101,11 +106,9 @@
 <script>
 import GridItem from './components/GridItem.vue'
 import GridLayout from './components/GridLayout.vue'
-// import ResponsiveGridLayout from './components/ResponsiveGridLayout.vue';
 import TestElement from './components/TestElement.vue'
 import CustomDragElement from './components/CustomDragElement.vue'
 import { getDocumentDir, setDocumentDir } from './helpers/DOM'
-//var eventBus = require('./eventBus');
 
 let testLayout = [
 	{ x: 0, y: 0, w: 2, h: 2, i: '0', resizable: true, draggable: true, static: false },
@@ -133,7 +136,6 @@ let testLayout = [
 export default {
 	name: 'app',
 	components: {
-		// ResponsiveGridLayout,
 		GridLayout,
 		GridItem,
 		TestElement,
@@ -150,7 +152,8 @@ export default {
 			preventCollision: false,
 			rowHeight: 30,
 			colNum: 12,
-			index: 0
+			index: 0,
+			gridPresent: true
 		}
 	},
 	mounted: function() {

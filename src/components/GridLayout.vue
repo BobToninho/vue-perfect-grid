@@ -20,7 +20,9 @@
 </style>
 <script>
 import Vue from 'vue'
-var elementResizeDetectorMaker = require('element-resize-detector')
+import elementResizeDetectorMaker from 'element-resize-detector'
+
+import GridItem from './GridItem.vue'
 
 import {
 	bottom,
@@ -36,9 +38,6 @@ import {
 	getColsFromBreakpoint,
 	findOrGenerateResponsiveLayout
 } from '../helpers/responsiveUtils'
-//var eventBus = require('./eventBus');
-
-import GridItem from './GridItem.vue'
 import { addWindowEventListener, removeWindowEventListener } from '../helpers/DOM'
 
 export default {
@@ -71,7 +70,7 @@ export default {
 		},
 		margin: {
 			type: Array,
-			default: function() {
+			default() {
 				return [10, 10]
 			}
 		},
@@ -105,13 +104,13 @@ export default {
 		},
 		breakpoints: {
 			type: Object,
-			default: function() {
+			default() {
 				return { lg: 1200, md: 996, sm: 768, xs: 480, xxs: 0 }
 			}
 		},
 		cols: {
 			type: Object,
-			default: function() {
+			default() {
 				return { lg: 12, md: 10, sm: 6, xs: 4, xxs: 2 }
 			}
 		},
@@ -120,7 +119,7 @@ export default {
 			default: false
 		}
 	},
-	data: function() {
+	data() {
 		return {
 			width: null,
 			mergedStyle: {},
@@ -139,173 +138,166 @@ export default {
 		}
 	},
 	created() {
-		const self = this
+		// TODO Communicate with props instead of EventBus
+		this._provided.eventBus = new Vue()
+		this.eventBus = this._provided.eventBus
+		this.eventBus.$on('resizeEvent', this.resizeEvent)
+		this.eventBus.$on('dragEvent', this.dragEvent)
 
-		// Accessible refernces of functions for removing in beforeDestroy
-		self.resizeEventHandler = function(eventType, i, x, y, h, w) {
-			self.resizeEvent(eventType, i, x, y, h, w)
-		}
-
-		self.dragEventHandler = function(eventType, i, x, y, h, w) {
-			self.dragEvent(eventType, i, x, y, h, w)
-		}
-
-		self._provided.eventBus = new Vue()
-		self.eventBus = self._provided.eventBus
-		self.eventBus.$on('resizeEvent', self.resizeEventHandler)
-		self.eventBus.$on('dragEvent', self.dragEventHandler)
-		self.$emit('layout-created', self.layout)
+		// * Core Event
+		this.$emit('layout-created', this.layout)
 	},
-	beforeDestroy: function() {
-		//Remove listeners
-		this.eventBus.$off('resizeEvent', this.resizeEventHandler)
-		this.eventBus.$off('dragEvent', this.dragEventHandler)
+	beforeDestroy() {
+		// * Core Event
+		this.$emit('layout-before-destroy', this.layout)
+
+		// Remove listeners
+		// TODO Communicate with props instead of EventBus
+		this.eventBus.$off('resizeEvent', this.resizeEvent)
+		this.eventBus.$off('dragEvent', this.dragEvent)
 		this.eventBus.$destroy()
 		removeWindowEventListener('resize', this.onWindowResize)
 		this.erd.uninstall(this.$refs.item)
 	},
-	beforeMount: function() {
+	beforeMount() {
+		// * Core Event
 		this.$emit('layout-before-mount', this.layout)
 	},
-	mounted: function() {
+	async mounted() {
+		// * Core Event
 		this.$emit('layout-mounted', this.layout)
-		this.$nextTick(function() {
-			validateLayout(this.layout)
 
-			this.originalLayout = this.layout
-			const self = this
-			this.$nextTick(function() {
-				self.onWindowResize()
+		await this.$nextTick()
 
-				self.initResponsiveFeatures()
+		validateLayout(this.layout)
+		this.originalLayout = this.layout
 
-				//self.width = self.$el.offsetWidth;
-				addWindowEventListener('resize', self.onWindowResize)
+		await this.$nextTick()
 
-				compact(self.layout, self.verticalCompact)
+		this.onWindowResize()
+		this.initResponsiveFeatures()
+		// this.width = this.$el.offsetWidth;
+		addWindowEventListener('resize', this.onWindowResize)
+		compact(this.layout, this.verticalCompact)
+		this.updateHeight()
 
-				self.updateHeight()
-				self.$nextTick(function() {
-					this.erd = elementResizeDetectorMaker({
-						strategy: 'scroll', //<- For ultra performance.
-						// See https://github.com/wnr/element-resize-detector/issues/110 about callOnAdd.
-						callOnAdd: false
-					})
-					this.erd.listenTo(self.$refs.item, function() {
-						self.onWindowResize()
-					})
-				})
-			})
+		await this.$nextTick()
+
+		// ERD Initialization
+		this.erd = elementResizeDetectorMaker({
+			strategy: 'scroll', //<- For ultra performance.
+			// See https://github.com/wnr/element-resize-detector/issues/110 about callOnAdd.
+			callOnAdd: false
+		})
+
+		this.erd.listenTo(this.$refs.item, () => {
+			this.onWindowResize()
 		})
 	},
 	watch: {
-		width: function(newval, oldval) {
-			const self = this
-			this.$nextTick(function() {
-				//this.$broadcast("updateWidth", this.width);
-				this.eventBus.$emit('updateWidth', this.width)
-				if (oldval === null) {
-					/*
-                            If oldval == null is when the width has never been
-                            set before. That only occurs when mouting is
-                            finished, and onWindowResize has been called and
-                            this.width has been changed the first time after it
-                            got set to null in the constructor. It is now time
-                            to issue layout-ready events as the GridItems have
-                            their sizes configured properly.
+		async width(newVal, oldVal) {
+			await this.$nextTick()
 
-                            The reason for emitting the layout-ready events on
-                            the next tick is to allow for the newly-emitted
-                            updateWidth event (above) to have reached the
-                            children GridItem-s and had their effect, so we're
-                            sure that they have the final size before we emit
-                            layout-ready (for this GridLayout) and
-                            item-layout-ready (for the GridItem-s).
+			this.eventBus.$emit('updateWidth', this.width)
+			this.updateHeight()
 
-                            This way any client event handlers can reliably
-                            invistigate stable sizes of GridItem-s.
-                        */
-					this.$nextTick(() => {
-						this.$emit('layout-ready', self.layout)
-					})
-				}
-				this.updateHeight()
-			})
+			/*
+				oldVal === null is when the width has never been
+				set before. That only occurs when mounting is
+				finished, and onWindowResize has been called and
+				this.width has been changed the first time after it
+				got set to null in the constructor. It is now time
+				to issue layout-ready events as the GridItem-s have
+				their sizes configured properly.
+
+				The reason for emitting the layout-ready event on
+				the next tick is to allow for the newly-emitted
+				updateWidth event (above) to have reached the
+				children GridItem-s and had their effect, so we're
+				sure that they have the final size before we emit
+				layout-ready (for this GridLayout) and
+				item-layout-ready (for the GridItem-s).
+
+				This way any client event handlers can reliably
+				invistigate stable sizes of GridItem-s.
+			*/
+			if (oldVal !== null) return
+			await this.$nextTick()
+
+			// * Core Event
+			this.$emit('layout-ready', this.layout)
 		},
-		layout: function() {
+		layout() {
+			// ? Insert this in the core API?
 			this.layoutUpdate()
 		},
-		colNum: function(val) {
+		colNum(val) {
 			this.eventBus.$emit('setColNum', val)
 		},
-		rowHeight: function() {
+		rowHeight() {
 			this.eventBus.$emit('setRowHeight', this.rowHeight)
 		},
-		isDraggable: function() {
+		isDraggable() {
 			this.eventBus.$emit('setDraggable', this.isDraggable)
 		},
-		isResizable: function() {
+		isResizable() {
 			this.eventBus.$emit('setResizable', this.isResizable)
 		},
 		responsive() {
 			if (!this.responsive) {
+				// ? Core Event?
 				this.$emit('update:layout', this.originalLayout)
 				this.eventBus.$emit('setColNum', this.colNum)
 			}
 			this.onWindowResize()
 		},
-		maxRows: function() {
+		maxRows() {
 			this.eventBus.$emit('setMaxRows', this.maxRows)
 		}
 	},
 	methods: {
 		layoutUpdate() {
-			if (this.layout !== undefined && this.originalLayout !== null) {
-				if (this.layout.length !== this.originalLayout.length) {
-					// console.log("### LAYOUT UPDATE!", this.layout.length, this.originalLayout.length);
+			if (this.layout === undefined || this.originalLayout === null) return
+			console.log('### LAYOUT UPDATE!', this.layout.length, this.originalLayout.length)
 
-					let diff = this.findDifference(this.layout, this.originalLayout)
-					if (diff.length > 0) {
-						// console.log(diff);
-						if (this.layout.length > this.originalLayout.length) {
-							this.originalLayout = this.originalLayout.concat(diff)
-						} else {
-							this.originalLayout = this.originalLayout.filter(obj => {
-								return !diff.some(obj2 => {
-									return obj.i === obj2.i
-								})
-							})
-						}
+			if (this.layout.length !== this.originalLayout.length) {
+				let diff = this.findDifference(this.layout, this.originalLayout)
+				if (diff.length > 0) {
+					// console.log(diff);
+					if (this.layout.length > this.originalLayout.length) {
+						this.originalLayout = this.originalLayout.concat(diff)
+					} else {
+						this.originalLayout = this.originalLayout.filter(obj => !diff.some(obj2 => obj.i === obj2.i))
 					}
-
-					this.lastLayoutLength = this.layout.length
-					this.initResponsiveFeatures()
 				}
 
-				compact(this.layout, this.verticalCompact)
-				this.eventBus.$emit('updateWidth', this.width)
-				this.updateHeight()
+				this.lastLayoutLength = this.layout.length
+				this.initResponsiveFeatures()
 			}
+
+			compact(this.layout, this.verticalCompact)
+			this.eventBus.$emit('updateWidth', this.width)
+			this.updateHeight()
 		},
-		updateHeight: function() {
+		updateHeight() {
 			this.mergedStyle = {
 				height: this.containerHeight()
 			}
 		},
-		onWindowResize: function() {
+		onWindowResize() {
 			if (this.$refs !== null && this.$refs.item !== null && this.$refs.item !== undefined) {
 				this.width = this.$refs.item.offsetWidth
 			}
 			this.eventBus.$emit('resizeEvent')
 		},
-		containerHeight: function() {
+		containerHeight() {
 			if (!this.autoSize) return
 			return bottom(this.layout) * (this.rowHeight + this.margin[1]) + this.margin[1] + 'px'
 		},
-		dragEvent: function(eventName, id, x, y, h, w) {
-			//console.log(eventName + " id=" + id + ", x=" + x + ", y=" + y);
+		dragEvent(eventName, id, x, y, h, w) {
+			// console.log(eventName + " id=" + id + ", x=" + x + ", y=" + y);
 			let l = getLayoutItem(this.layout, id)
-			//GetLayoutItem sometimes returns null object
+			// GetLayoutItem sometimes returns null object
 			if (l === undefined || l === null) {
 				l = { x: 0, y: 0 }
 			}
@@ -316,13 +308,12 @@ export default {
 				this.placeholder.y = l.y
 				this.placeholder.w = w
 				this.placeholder.h = h
-				this.$nextTick(function() {
+				this.$nextTick(() => {
 					this.isDragging = true
 				})
-				//this.$broadcast("updateWidth", this.width);
 				this.eventBus.$emit('updateWidth', this.width)
 			} else {
-				this.$nextTick(function() {
+				this.$nextTick(() => {
 					this.isDragging = false
 				})
 			}
@@ -333,11 +324,14 @@ export default {
 			// needed because vue can't detect changes on array element properties
 			this.eventBus.$emit('compact')
 			this.updateHeight()
-			if (eventName === 'dragend') this.$emit('layout-updated', this.layout)
+
+			if (eventName === 'dragend') {
+				this.$emit('layout-updated', this.layout)
+			}
 		},
-		resizeEvent: function(eventName, id, x, y, h, w) {
+		resizeEvent(eventName, id, x, y, h, w) {
 			let l = getLayoutItem(this.layout, id)
-			//GetLayoutItem sometimes return null object
+			// GetLayoutItem sometimes return null object
 			if (l === undefined || l === null) {
 				l = { h: 0, w: 0 }
 			}
@@ -377,7 +371,6 @@ export default {
 				this.$nextTick(function() {
 					this.isDragging = true
 				})
-				//this.$broadcast("updateWidth", this.width);
 				this.eventBus.$emit('updateWidth', this.width)
 			} else {
 				this.$nextTick(function() {
@@ -391,7 +384,10 @@ export default {
 			this.eventBus.$emit('compact')
 			this.updateHeight()
 
-			if (eventName === 'resizeend') this.$emit('layout-updated', this.layout)
+			if (eventName === 'resizeend') {
+				// * Core Event
+				this.$emit('layout-updated', this.layout)
+			}
 		},
 
 		// finds or generates new layouts for set breakpoints
@@ -400,8 +396,9 @@ export default {
 			let newCols = getColsFromBreakpoint(newBreakpoint, this.cols)
 
 			// save actual layout in layouts
-			if (this.lastBreakpoint != null && !this.layouts[this.lastBreakpoint])
+			if (this.lastBreakpoint != null && !this.layouts[this.lastBreakpoint]) {
 				this.layouts[this.lastBreakpoint] = cloneLayout(this.layout)
+			}
 
 			// Find or generate a new layout.
 			let layout = findOrGenerateResponsiveLayout(
@@ -417,7 +414,7 @@ export default {
 			// Store the new layout.
 			this.layouts[newBreakpoint] = layout
 
-			// new prop sync
+			// Needed to keep updated the layout prop (that is passed with .sync)
 			this.$emit('update:layout', layout)
 
 			this.lastBreakpoint = newBreakpoint
@@ -432,21 +429,13 @@ export default {
 
 		// find difference in layouts
 		findDifference(layout, originalLayout) {
-			//Find values that are in result1 but not in result2
-			let uniqueResultOne = layout.filter(function(obj) {
-				return !originalLayout.some(function(obj2) {
-					return obj.i === obj2.i
-				})
-			})
+			// Find values that are in result1 but not in result2
+			let uniqueResultOne = layout.filter(obj => !originalLayout.some(obj2 => obj.i === obj2.i))
 
-			//Find values that are in result2 but not in result1
-			let uniqueResultTwo = originalLayout.filter(function(obj) {
-				return !layout.some(function(obj2) {
-					return obj.i === obj2.i
-				})
-			})
+			// Find values that are in result2 but not in result1
+			let uniqueResultTwo = originalLayout.filter(obj => !layout.some(obj2 => obj.i === obj2.i))
 
-			//Combine the two arrays of unique entries#
+			// Combine the two arrays of unique entries#
 			return uniqueResultOne.concat(uniqueResultTwo)
 		}
 	}

@@ -2,7 +2,6 @@
 	<div ref="item" class="vue-grid-item" :class="classObj" :style="style">
 		<slot></slot>
 		<span v-if="resizableAndNotStatic" ref="handle" :class="resizableHandleClass"></span>
-		<!--<span v-if="draggable" ref="dragHandle" class="vue-draggable-handle"></span>-->
 	</div>
 </template>
 <style>
@@ -85,34 +84,12 @@
 import { setTopLeft, setTopRight, setTransformRtl, setTransform } from '../helpers/utils'
 import { getControlPosition, createCoreData } from '../helpers/draggableUtils'
 import { getDocumentDir } from '../helpers/DOM'
-//    var eventBus = require('./eventBus');
 
-let interact = require('interactjs')
+import interact from 'interactjs'
 
 export default {
 	name: 'GridItem',
 	props: {
-		/*cols: {
-             type: Number,
-             required: true
-             },*/
-		/*containerWidth: {
-             type: Number,
-             required: true
-
-             },
-             rowHeight: {
-             type: Number,
-             required: true
-             },
-             margin: {
-             type: Array,
-             required: true
-             },
-             maxRows: {
-             type: Number,
-             required: true
-             },*/
 		isDraggable: {
 			type: Boolean,
 			required: false,
@@ -123,11 +100,6 @@ export default {
 			required: false,
 			default: null
 		},
-		/*useCssTransforms: {
-             type: Boolean,
-             required: true
-             },
-             */
 		static: {
 			type: Boolean,
 			required: false,
@@ -189,7 +161,7 @@ export default {
 		}
 	},
 	inject: ['eventBus'],
-	data: function() {
+	data() {
 		return {
 			cols: 1,
 			containerWidth: 100,
@@ -225,153 +197,117 @@ export default {
 		}
 	},
 	created() {
-		let self = this
-
-		// Accessible refernces of functions for removing in beforeDestroy
-		self.updateWidthHandler = function(width) {
-			self.updateWidth(width)
-		}
-
-		self.compactHandler = function(layout) {
-			self.compact(layout)
-		}
-
-		self.setDraggableHandler = function(isDraggable) {
-			if (self.isDraggable === null) {
-				self.draggable = isDraggable
-			}
-		}
-
-		self.setResizableHandler = function(isResizable) {
-			if (self.isResizable === null) {
-				self.resizable = isResizable
-			}
-		}
-
-		self.setRowHeightHandler = function(rowHeight) {
-			self.rowHeight = rowHeight
-		}
-
-		self.setMaxRowsHandler = function(maxRows) {
-			self.maxRows = maxRows
-		}
-
-		self.directionchangeHandler = () => {
-			this.rtl = getDocumentDir() === 'rtl'
-			this.compact()
-		}
-
-		self.setColNum = colNum => {
-			self.cols = parseInt(colNum)
-		}
-
-		this.eventBus.$on('updateWidth', self.updateWidthHandler)
-		this.eventBus.$on('compact', self.compactHandler)
-		this.eventBus.$on('setDraggable', self.setDraggableHandler)
-		this.eventBus.$on('setResizable', self.setResizableHandler)
-		this.eventBus.$on('setRowHeight', self.setRowHeightHandler)
-		this.eventBus.$on('setMaxRows', self.setMaxRowsHandler)
-		this.eventBus.$on('directionchange', self.directionchangeHandler)
-		this.eventBus.$on('setColNum', self.setColNum)
+		// TODO Communicate with props instead of EventBus
+		this.eventBus.$on('updateWidth', this.updateWidth)
+		this.eventBus.$on('compact', this.compact)
+		this.eventBus.$on('setDraggable', this.setDraggable)
+		this.eventBus.$on('setResizable', this.setResizable)
+		this.eventBus.$on('setRowHeight', this.setRowHeight)
+		this.eventBus.$on('setMaxRows', this.setMaxRows)
+		this.eventBus.$on('directionchange', this.directionChange)
+		this.eventBus.$on('setColNum', this.setColNum)
 
 		this.rtl = getDocumentDir() === 'rtl'
 	},
-	beforeDestroy: function() {
-		let self = this
-		//Remove listeners
-		this.eventBus.$off('updateWidth', self.updateWidthHandler)
-		this.eventBus.$off('compact', self.compactHandler)
-		this.eventBus.$off('setDraggable', self.setDraggableHandler)
-		this.eventBus.$off('setResizable', self.setResizableHandler)
-		this.eventBus.$off('setRowHeight', self.setRowHeightHandler)
-		this.eventBus.$off('setMaxRows', self.setMaxRowsHandler)
-		this.eventBus.$off('directionchange', self.directionchangeHandler)
-		this.eventBus.$off('setColNum', self.setColNum)
-		this.interactObj.unset() // destroy interact intance
+	beforeDestroy() {
+		// Remove listeners
+		// TODO Communicate with props instead of EventBus
+		this.eventBus.$off('updateWidth', this.updateWidth)
+		this.eventBus.$off('compact', this.compactHandler)
+		this.eventBus.$off('setDraggable', this.setDraggable)
+		this.eventBus.$off('setResizable', this.setResizable)
+		this.eventBus.$off('setRowHeight', this.setRowHeight)
+		this.eventBus.$off('setMaxRows', this.setMaxRows)
+		this.eventBus.$off('directionchange', this.directionChange)
+		this.eventBus.$off('setColNum', this.setColNum)
+
+		// Destroy interact instance
+		this.interactObj.unset()
 	},
-	mounted: function() {
+	mounted() {
 		this.cols = this.$parent.colNum
 		this.rowHeight = this.$parent.rowHeight
 		this.containerWidth = this.$parent.width !== null ? this.$parent.width : 100
 		this.margin = this.$parent.margin !== undefined ? this.$parent.margin : [10, 10]
 		this.maxRows = this.$parent.maxRows
+
 		if (this.isDraggable === null) {
 			this.draggable = this.$parent.isDraggable
 		} else {
 			this.draggable = this.isDraggable
 		}
+
 		if (this.isResizable === null) {
 			this.resizable = this.$parent.isResizable
 		} else {
 			this.resizable = this.isResizable
 		}
+
 		this.useCssTransforms = this.$parent.useCssTransforms
 		this.createStyle()
 	},
 	watch: {
-		isDraggable: function() {
+		isDraggable() {
 			this.draggable = this.isDraggable
 		},
-		static: function() {
+		static() {
 			this.tryMakeDraggable()
 			this.tryMakeResizable()
 		},
-		draggable: function() {
+		draggable() {
 			this.tryMakeDraggable()
 		},
-		isResizable: function() {
+		isResizable() {
 			this.resizable = this.isResizable
 		},
-		resizable: function() {
+		resizable() {
 			this.tryMakeResizable()
 		},
-		rowHeight: function() {
+		rowHeight() {
 			this.createStyle()
 			this.emitContainerResized()
 		},
-		cols: function() {
-			this.tryMakeResizable()
-			this.createStyle()
-			this.emitContainerResized()
-		},
-		containerWidth: function() {
+		cols() {
 			this.tryMakeResizable()
 			this.createStyle()
 			this.emitContainerResized()
 		},
-		x: function(newVal) {
+		containerWidth() {
+			this.tryMakeResizable()
+			this.createStyle()
+			this.emitContainerResized()
+		},
+		x(newVal) {
 			this.innerX = newVal
 			this.createStyle()
 		},
-		y: function(newVal) {
+		y(newVal) {
 			this.innerY = newVal
 			this.createStyle()
 		},
-		h: function(newVal) {
+		h(newVal) {
 			this.innerH = newVal
 			this.createStyle()
-			// this.emitContainerResized();
 		},
-		w: function(newVal) {
+		w(newVal) {
 			this.innerW = newVal
 			this.createStyle()
-			// this.emitContainerResized();
 		},
-		renderRtl: function() {
+		renderRtl() {
 			// console.log("### renderRtl");
 			this.tryMakeResizable()
 			this.createStyle()
 		},
-		minH: function() {
+		minH() {
 			this.tryMakeResizable()
 		},
-		maxH: function() {
+		maxH() {
 			this.tryMakeResizable()
 		},
-		minW: function() {
+		minW() {
 			this.tryMakeResizable()
 		},
-		maxW: function() {
+		maxW() {
 			this.tryMakeResizable()
 		}
 	},
@@ -409,7 +345,7 @@ export default {
 		}
 	},
 	methods: {
-		createStyle: function() {
+		createStyle() {
 			if (this.x + this.w > this.cols) {
 				this.innerX = 0
 				this.innerW = this.w > this.cols ? this.cols : this.w
@@ -417,11 +353,12 @@ export default {
 				this.innerX = this.x
 				this.innerW = this.w
 			}
+
 			let pos = this.calcPosition(this.innerX, this.innerY, this.innerW, this.innerH)
 
 			if (this.isDragging) {
 				pos.top = this.dragging.top
-				//                    Add rtl support
+				// Add rtl support
 				if (this.renderRtl) {
 					pos.right = this.dragging.left
 				} else {
@@ -436,7 +373,7 @@ export default {
 			let style
 			// CSS Transforms support (default)
 			if (this.useCssTransforms) {
-				//                    Add rtl support
+				// Add rtl support
 				if (this.renderRtl) {
 					style = setTransformRtl(pos.top, pos.right, pos.width, pos.height)
 				} else {
@@ -444,7 +381,7 @@ export default {
 				}
 			} else {
 				// top,left (slow)
-				//                    Add rtl support
+				// Add rtl support
 				if (this.renderRtl) {
 					style = setTopRight(pos.top, pos.right, pos.width, pos.height)
 				} else {
@@ -463,9 +400,11 @@ export default {
 				if (!matches) return
 				styleProps[prop] = matches[1]
 			}
+
+			// * Core Event
 			this.$emit('container-resized', this.i, this.h, this.w, styleProps.height, styleProps.width)
 		},
-		handleResize: function(event) {
+		handleResize(event) {
 			if (this.static) return
 			const position = getControlPosition(event)
 			// Get the current drag point from the event. This is used as the offset.
@@ -486,7 +425,7 @@ export default {
 					break
 				}
 				case 'resizemove': {
-					//                        console.log("### resize => " + event.type + ", lastW=" + this.lastW + ", lastH=" + this.lastH);
+					// console.log("### resize => " + event.type + ", lastW=" + this.lastW + ", lastH=" + this.lastH);
 					const coreEvent = createCoreData(this.lastW, this.lastH, x, y)
 					if (this.renderRtl) {
 						newSize.width = this.resizing.width - coreEvent.deltaX
@@ -495,16 +434,16 @@ export default {
 					}
 					newSize.height = this.resizing.height + coreEvent.deltaY
 
-					///console.log("### resize => " + event.type + ", deltaX=" + coreEvent.deltaX + ", deltaY=" + coreEvent.deltaY);
+					// console.log("### resize => " + event.type + ", deltaX=" + coreEvent.deltaX + ", deltaY=" + coreEvent.deltaY);
 					this.resizing = newSize
 					break
 				}
 				case 'resizeend': {
-					//console.log("### resize end => x=" +this.innerX + " y=" + this.innerY + " w=" + this.innerW + " h=" + this.innerH);
+					// console.log("### resize end => x=" +this.innerX + " y=" + this.innerY + " w=" + this.innerW + " h=" + this.innerH);
 					pos = this.calcPosition(this.innerX, this.innerY, this.innerW, this.innerH)
 					newSize.width = pos.width
 					newSize.height = pos.height
-					//                        console.log("### resize end => " + JSON.stringify(newSize));
+					// console.log("### resize end => " + JSON.stringify(newSize));
 					this.resizing = null
 					this.isResizing = false
 					break
@@ -537,9 +476,11 @@ export default {
 			this.lastH = y
 
 			if (this.innerW !== pos.w || this.innerH !== pos.h) {
+				// * Core Event
 				this.$emit('resize', this.i, pos.h, pos.w, newSize.height, newSize.width)
 			}
 			if (event.type === 'resizeend' && (this.previousW !== this.innerW || this.previousH !== this.innerH)) {
+				// * Core Event
 				this.$emit('resized', this.i, pos.h, pos.w, newSize.height, newSize.width)
 			}
 			this.eventBus.$emit('resizeEvent', event.type, this.i, this.innerX, this.innerY, pos.h, pos.w)
@@ -552,6 +493,7 @@ export default {
 
 			// Get the current drag point from the event. This is used as the offset.
 			if (position === null) return // not possible but satisfies flow
+
 			const { x, y } = position
 
 			// let shouldUpdate = false;
@@ -577,15 +519,15 @@ export default {
 					if (!this.isDragging) return
 					let parentRect = event.target.offsetParent.getBoundingClientRect()
 					let clientRect = event.target.getBoundingClientRect()
-					//                        Add rtl support
+					// Add rtl support
 					if (this.renderRtl) {
 						newPosition.left = (clientRect.right - parentRect.right) * -1
 					} else {
 						newPosition.left = clientRect.left - parentRect.left
 					}
 					newPosition.top = clientRect.top - parentRect.top
-					//                        console.log("### drag end => " + JSON.stringify(newPosition));
-					//                        console.log("### DROP: " + JSON.stringify(newPosition));
+					// console.log("### drag end => " + JSON.stringify(newPosition));
+					// console.log("### DROP: " + JSON.stringify(newPosition));
 					this.dragging = null
 					this.isDragging = false
 					// shouldUpdate = true;
@@ -593,16 +535,16 @@ export default {
 				}
 				case 'dragmove': {
 					const coreEvent = createCoreData(this.lastX, this.lastY, x, y)
-					//                        Add rtl support
+					// Add rtl support
 					if (this.renderRtl) {
 						newPosition.left = this.dragging.left - coreEvent.deltaX
 					} else {
 						newPosition.left = this.dragging.left + coreEvent.deltaX
 					}
 					newPosition.top = this.dragging.top + coreEvent.deltaY
-					//                        console.log("### drag => " + event.type + ", x=" + x + ", y=" + y);
-					//                        console.log("### drag => " + event.type + ", deltaX=" + coreEvent.deltaX + ", deltaY=" + coreEvent.deltaY);
-					//                        console.log("### drag end => " + JSON.stringify(newPosition));
+					// console.log("### drag => " + event.type + ", x=" + x + ", y=" + y);
+					// console.log("### drag => " + event.type + ", deltaX=" + coreEvent.deltaX + ", deltaY=" + coreEvent.deltaY);
+					// console.log("### drag end => " + JSON.stringify(newPosition));
 					this.dragging = newPosition
 					break
 				}
@@ -620,14 +562,16 @@ export default {
 			this.lastY = y
 
 			if (this.innerX !== pos.x || this.innerY !== pos.y) {
+				// * Core Event
 				this.$emit('move', this.i, pos.x, pos.y)
 			}
 			if (event.type === 'dragend' && (this.previousX !== this.innerX || this.previousY !== this.innerY)) {
+				// * Core Event
 				this.$emit('moved', this.i, pos.x, pos.y)
 			}
 			this.eventBus.$emit('dragEvent', event.type, this.i, pos.x, pos.y, this.innerH, this.innerW)
 		},
-		calcPosition: function(x, y, w, h) {
+		calcPosition(x, y, w, h) {
 			const colWidth = this.calcColWidth()
 			// add rtl support
 			let out
@@ -708,31 +652,56 @@ export default {
 			h = Math.max(Math.min(h, this.maxRows - this.innerY), 0)
 			return { w, h }
 		},
-		updateWidth: function(width, colNum) {
+		updateWidth(width, colNum) {
 			this.containerWidth = width
 			if (colNum !== undefined && colNum !== null) {
 				this.cols = colNum
 			}
 		},
-		compact: function() {
+		compact() {
 			this.createStyle()
 		},
-		tryMakeDraggable: function() {
-			const self = this
+		setDraggable(isDraggable) {
+			if (this.isDraggable !== null) return
+
+			this.draggable = isDraggable
+		},
+		setResizable(isResizable) {
+			if (this.isResizable !== null) return
+
+			this.resizable = isResizable
+		},
+		setRowHeight(rowHeight) {
+			this.rowHeight = rowHeight
+		},
+		setMaxRows(maxRows) {
+			this.maxRows = maxRows
+		},
+		directionChange() {
+			this.rtl = getDocumentDir() === 'rtl'
+			this.compact()
+		},
+		setColNum(colNum) {
+			this.cols = parseInt(colNum)
+		},
+		tryMakeDraggable() {
 			if (this.interactObj === null || this.interactObj === undefined) {
 				this.interactObj = interact(this.$refs.item)
 			}
+
 			if (this.draggable && !this.static) {
 				const opts = {
 					ignoreFrom: this.dragIgnoreFrom,
 					allowFrom: this.dragAllowFrom
 				}
+
 				this.interactObj.draggable(opts)
 				/*this.interactObj.draggable({allowFrom: '.vue-draggable-handle'});*/
+
 				if (!this.dragEventSet) {
 					this.dragEventSet = true
-					this.interactObj.on('dragstart dragmove dragend', function(event) {
-						self.handleDrag(event)
+					this.interactObj.on('dragstart dragmove dragend', event => {
+						this.handleDrag(event)
 					})
 				}
 			} else {
@@ -741,11 +710,11 @@ export default {
 				})
 			}
 		},
-		tryMakeResizable: function() {
-			const self = this
+		tryMakeResizable() {
 			if (this.interactObj === null || this.interactObj === undefined) {
 				this.interactObj = interact(this.$refs.item)
 			}
+
 			if (this.resizable && !this.static) {
 				let maximum = this.calcPosition(0, 0, this.maxW, this.maxH)
 				let minimum = this.calcPosition(0, 0, this.minW, this.minH)
@@ -778,8 +747,8 @@ export default {
 				this.interactObj.resizable(opts)
 				if (!this.resizeEventSet) {
 					this.resizeEventSet = true
-					this.interactObj.on('resizestart resizemove resizeend', function(event) {
-						self.handleResize(event)
+					this.interactObj.on('resizestart resizemove resizeend', event => {
+						this.handleResize(event)
 					})
 				}
 			} else {
@@ -788,8 +757,8 @@ export default {
 				})
 			}
 		},
-		autoSize: function() {
-			// ok here we want to calculate if a resize is needed
+		autoSize() {
+			// We want to calculate if a resize is needed
 			this.previousW = this.innerW
 			this.previousH = this.innerH
 
@@ -819,10 +788,13 @@ export default {
 			// this.lastH = y;
 
 			if (this.innerW !== pos.w || this.innerH !== pos.h) {
+				// * Core Event
 				this.$emit('resize', this.i, pos.h, pos.w, newSize.height, newSize.width)
 			}
 			if (this.previousW !== pos.w || this.previousH !== pos.h) {
+				// * Core Event
 				this.$emit('resized', this.i, pos.h, pos.w, newSize.height, newSize.width)
+
 				this.eventBus.$emit('resizeEvent', 'resizeend', this.i, this.innerX, this.innerY, pos.h, pos.w)
 			}
 		}

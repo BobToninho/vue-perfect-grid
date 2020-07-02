@@ -2186,6 +2186,742 @@ exports.f = Object.getOwnPropertyNames || function getOwnPropertyNames(O) {
 
 /***/ }),
 
+/***/ "96cf":
+/***/ (function(module, exports, __webpack_require__) {
+
+/**
+ * Copyright (c) 2014-present, Facebook, Inc.
+ *
+ * This source code is licensed under the MIT license found in the
+ * LICENSE file in the root directory of this source tree.
+ */
+
+var runtime = (function (exports) {
+  "use strict";
+
+  var Op = Object.prototype;
+  var hasOwn = Op.hasOwnProperty;
+  var undefined; // More compressible than void 0.
+  var $Symbol = typeof Symbol === "function" ? Symbol : {};
+  var iteratorSymbol = $Symbol.iterator || "@@iterator";
+  var asyncIteratorSymbol = $Symbol.asyncIterator || "@@asyncIterator";
+  var toStringTagSymbol = $Symbol.toStringTag || "@@toStringTag";
+
+  function wrap(innerFn, outerFn, self, tryLocsList) {
+    // If outerFn provided and outerFn.prototype is a Generator, then outerFn.prototype instanceof Generator.
+    var protoGenerator = outerFn && outerFn.prototype instanceof Generator ? outerFn : Generator;
+    var generator = Object.create(protoGenerator.prototype);
+    var context = new Context(tryLocsList || []);
+
+    // The ._invoke method unifies the implementations of the .next,
+    // .throw, and .return methods.
+    generator._invoke = makeInvokeMethod(innerFn, self, context);
+
+    return generator;
+  }
+  exports.wrap = wrap;
+
+  // Try/catch helper to minimize deoptimizations. Returns a completion
+  // record like context.tryEntries[i].completion. This interface could
+  // have been (and was previously) designed to take a closure to be
+  // invoked without arguments, but in all the cases we care about we
+  // already have an existing method we want to call, so there's no need
+  // to create a new function object. We can even get away with assuming
+  // the method takes exactly one argument, since that happens to be true
+  // in every case, so we don't have to touch the arguments object. The
+  // only additional allocation required is the completion record, which
+  // has a stable shape and so hopefully should be cheap to allocate.
+  function tryCatch(fn, obj, arg) {
+    try {
+      return { type: "normal", arg: fn.call(obj, arg) };
+    } catch (err) {
+      return { type: "throw", arg: err };
+    }
+  }
+
+  var GenStateSuspendedStart = "suspendedStart";
+  var GenStateSuspendedYield = "suspendedYield";
+  var GenStateExecuting = "executing";
+  var GenStateCompleted = "completed";
+
+  // Returning this object from the innerFn has the same effect as
+  // breaking out of the dispatch switch statement.
+  var ContinueSentinel = {};
+
+  // Dummy constructor functions that we use as the .constructor and
+  // .constructor.prototype properties for functions that return Generator
+  // objects. For full spec compliance, you may wish to configure your
+  // minifier not to mangle the names of these two functions.
+  function Generator() {}
+  function GeneratorFunction() {}
+  function GeneratorFunctionPrototype() {}
+
+  // This is a polyfill for %IteratorPrototype% for environments that
+  // don't natively support it.
+  var IteratorPrototype = {};
+  IteratorPrototype[iteratorSymbol] = function () {
+    return this;
+  };
+
+  var getProto = Object.getPrototypeOf;
+  var NativeIteratorPrototype = getProto && getProto(getProto(values([])));
+  if (NativeIteratorPrototype &&
+      NativeIteratorPrototype !== Op &&
+      hasOwn.call(NativeIteratorPrototype, iteratorSymbol)) {
+    // This environment has a native %IteratorPrototype%; use it instead
+    // of the polyfill.
+    IteratorPrototype = NativeIteratorPrototype;
+  }
+
+  var Gp = GeneratorFunctionPrototype.prototype =
+    Generator.prototype = Object.create(IteratorPrototype);
+  GeneratorFunction.prototype = Gp.constructor = GeneratorFunctionPrototype;
+  GeneratorFunctionPrototype.constructor = GeneratorFunction;
+  GeneratorFunctionPrototype[toStringTagSymbol] =
+    GeneratorFunction.displayName = "GeneratorFunction";
+
+  // Helper for defining the .next, .throw, and .return methods of the
+  // Iterator interface in terms of a single ._invoke method.
+  function defineIteratorMethods(prototype) {
+    ["next", "throw", "return"].forEach(function(method) {
+      prototype[method] = function(arg) {
+        return this._invoke(method, arg);
+      };
+    });
+  }
+
+  exports.isGeneratorFunction = function(genFun) {
+    var ctor = typeof genFun === "function" && genFun.constructor;
+    return ctor
+      ? ctor === GeneratorFunction ||
+        // For the native GeneratorFunction constructor, the best we can
+        // do is to check its .name property.
+        (ctor.displayName || ctor.name) === "GeneratorFunction"
+      : false;
+  };
+
+  exports.mark = function(genFun) {
+    if (Object.setPrototypeOf) {
+      Object.setPrototypeOf(genFun, GeneratorFunctionPrototype);
+    } else {
+      genFun.__proto__ = GeneratorFunctionPrototype;
+      if (!(toStringTagSymbol in genFun)) {
+        genFun[toStringTagSymbol] = "GeneratorFunction";
+      }
+    }
+    genFun.prototype = Object.create(Gp);
+    return genFun;
+  };
+
+  // Within the body of any async function, `await x` is transformed to
+  // `yield regeneratorRuntime.awrap(x)`, so that the runtime can test
+  // `hasOwn.call(value, "__await")` to determine if the yielded value is
+  // meant to be awaited.
+  exports.awrap = function(arg) {
+    return { __await: arg };
+  };
+
+  function AsyncIterator(generator, PromiseImpl) {
+    function invoke(method, arg, resolve, reject) {
+      var record = tryCatch(generator[method], generator, arg);
+      if (record.type === "throw") {
+        reject(record.arg);
+      } else {
+        var result = record.arg;
+        var value = result.value;
+        if (value &&
+            typeof value === "object" &&
+            hasOwn.call(value, "__await")) {
+          return PromiseImpl.resolve(value.__await).then(function(value) {
+            invoke("next", value, resolve, reject);
+          }, function(err) {
+            invoke("throw", err, resolve, reject);
+          });
+        }
+
+        return PromiseImpl.resolve(value).then(function(unwrapped) {
+          // When a yielded Promise is resolved, its final value becomes
+          // the .value of the Promise<{value,done}> result for the
+          // current iteration.
+          result.value = unwrapped;
+          resolve(result);
+        }, function(error) {
+          // If a rejected Promise was yielded, throw the rejection back
+          // into the async generator function so it can be handled there.
+          return invoke("throw", error, resolve, reject);
+        });
+      }
+    }
+
+    var previousPromise;
+
+    function enqueue(method, arg) {
+      function callInvokeWithMethodAndArg() {
+        return new PromiseImpl(function(resolve, reject) {
+          invoke(method, arg, resolve, reject);
+        });
+      }
+
+      return previousPromise =
+        // If enqueue has been called before, then we want to wait until
+        // all previous Promises have been resolved before calling invoke,
+        // so that results are always delivered in the correct order. If
+        // enqueue has not been called before, then it is important to
+        // call invoke immediately, without waiting on a callback to fire,
+        // so that the async generator function has the opportunity to do
+        // any necessary setup in a predictable way. This predictability
+        // is why the Promise constructor synchronously invokes its
+        // executor callback, and why async functions synchronously
+        // execute code before the first await. Since we implement simple
+        // async functions in terms of async generators, it is especially
+        // important to get this right, even though it requires care.
+        previousPromise ? previousPromise.then(
+          callInvokeWithMethodAndArg,
+          // Avoid propagating failures to Promises returned by later
+          // invocations of the iterator.
+          callInvokeWithMethodAndArg
+        ) : callInvokeWithMethodAndArg();
+    }
+
+    // Define the unified helper method that is used to implement .next,
+    // .throw, and .return (see defineIteratorMethods).
+    this._invoke = enqueue;
+  }
+
+  defineIteratorMethods(AsyncIterator.prototype);
+  AsyncIterator.prototype[asyncIteratorSymbol] = function () {
+    return this;
+  };
+  exports.AsyncIterator = AsyncIterator;
+
+  // Note that simple async functions are implemented on top of
+  // AsyncIterator objects; they just return a Promise for the value of
+  // the final result produced by the iterator.
+  exports.async = function(innerFn, outerFn, self, tryLocsList, PromiseImpl) {
+    if (PromiseImpl === void 0) PromiseImpl = Promise;
+
+    var iter = new AsyncIterator(
+      wrap(innerFn, outerFn, self, tryLocsList),
+      PromiseImpl
+    );
+
+    return exports.isGeneratorFunction(outerFn)
+      ? iter // If outerFn is a generator, return the full iterator.
+      : iter.next().then(function(result) {
+          return result.done ? result.value : iter.next();
+        });
+  };
+
+  function makeInvokeMethod(innerFn, self, context) {
+    var state = GenStateSuspendedStart;
+
+    return function invoke(method, arg) {
+      if (state === GenStateExecuting) {
+        throw new Error("Generator is already running");
+      }
+
+      if (state === GenStateCompleted) {
+        if (method === "throw") {
+          throw arg;
+        }
+
+        // Be forgiving, per 25.3.3.3.3 of the spec:
+        // https://people.mozilla.org/~jorendorff/es6-draft.html#sec-generatorresume
+        return doneResult();
+      }
+
+      context.method = method;
+      context.arg = arg;
+
+      while (true) {
+        var delegate = context.delegate;
+        if (delegate) {
+          var delegateResult = maybeInvokeDelegate(delegate, context);
+          if (delegateResult) {
+            if (delegateResult === ContinueSentinel) continue;
+            return delegateResult;
+          }
+        }
+
+        if (context.method === "next") {
+          // Setting context._sent for legacy support of Babel's
+          // function.sent implementation.
+          context.sent = context._sent = context.arg;
+
+        } else if (context.method === "throw") {
+          if (state === GenStateSuspendedStart) {
+            state = GenStateCompleted;
+            throw context.arg;
+          }
+
+          context.dispatchException(context.arg);
+
+        } else if (context.method === "return") {
+          context.abrupt("return", context.arg);
+        }
+
+        state = GenStateExecuting;
+
+        var record = tryCatch(innerFn, self, context);
+        if (record.type === "normal") {
+          // If an exception is thrown from innerFn, we leave state ===
+          // GenStateExecuting and loop back for another invocation.
+          state = context.done
+            ? GenStateCompleted
+            : GenStateSuspendedYield;
+
+          if (record.arg === ContinueSentinel) {
+            continue;
+          }
+
+          return {
+            value: record.arg,
+            done: context.done
+          };
+
+        } else if (record.type === "throw") {
+          state = GenStateCompleted;
+          // Dispatch the exception by looping back around to the
+          // context.dispatchException(context.arg) call above.
+          context.method = "throw";
+          context.arg = record.arg;
+        }
+      }
+    };
+  }
+
+  // Call delegate.iterator[context.method](context.arg) and handle the
+  // result, either by returning a { value, done } result from the
+  // delegate iterator, or by modifying context.method and context.arg,
+  // setting context.delegate to null, and returning the ContinueSentinel.
+  function maybeInvokeDelegate(delegate, context) {
+    var method = delegate.iterator[context.method];
+    if (method === undefined) {
+      // A .throw or .return when the delegate iterator has no .throw
+      // method always terminates the yield* loop.
+      context.delegate = null;
+
+      if (context.method === "throw") {
+        // Note: ["return"] must be used for ES3 parsing compatibility.
+        if (delegate.iterator["return"]) {
+          // If the delegate iterator has a return method, give it a
+          // chance to clean up.
+          context.method = "return";
+          context.arg = undefined;
+          maybeInvokeDelegate(delegate, context);
+
+          if (context.method === "throw") {
+            // If maybeInvokeDelegate(context) changed context.method from
+            // "return" to "throw", let that override the TypeError below.
+            return ContinueSentinel;
+          }
+        }
+
+        context.method = "throw";
+        context.arg = new TypeError(
+          "The iterator does not provide a 'throw' method");
+      }
+
+      return ContinueSentinel;
+    }
+
+    var record = tryCatch(method, delegate.iterator, context.arg);
+
+    if (record.type === "throw") {
+      context.method = "throw";
+      context.arg = record.arg;
+      context.delegate = null;
+      return ContinueSentinel;
+    }
+
+    var info = record.arg;
+
+    if (! info) {
+      context.method = "throw";
+      context.arg = new TypeError("iterator result is not an object");
+      context.delegate = null;
+      return ContinueSentinel;
+    }
+
+    if (info.done) {
+      // Assign the result of the finished delegate to the temporary
+      // variable specified by delegate.resultName (see delegateYield).
+      context[delegate.resultName] = info.value;
+
+      // Resume execution at the desired location (see delegateYield).
+      context.next = delegate.nextLoc;
+
+      // If context.method was "throw" but the delegate handled the
+      // exception, let the outer generator proceed normally. If
+      // context.method was "next", forget context.arg since it has been
+      // "consumed" by the delegate iterator. If context.method was
+      // "return", allow the original .return call to continue in the
+      // outer generator.
+      if (context.method !== "return") {
+        context.method = "next";
+        context.arg = undefined;
+      }
+
+    } else {
+      // Re-yield the result returned by the delegate method.
+      return info;
+    }
+
+    // The delegate iterator is finished, so forget it and continue with
+    // the outer generator.
+    context.delegate = null;
+    return ContinueSentinel;
+  }
+
+  // Define Generator.prototype.{next,throw,return} in terms of the
+  // unified ._invoke helper method.
+  defineIteratorMethods(Gp);
+
+  Gp[toStringTagSymbol] = "Generator";
+
+  // A Generator should always return itself as the iterator object when the
+  // @@iterator function is called on it. Some browsers' implementations of the
+  // iterator prototype chain incorrectly implement this, causing the Generator
+  // object to not be returned from this call. This ensures that doesn't happen.
+  // See https://github.com/facebook/regenerator/issues/274 for more details.
+  Gp[iteratorSymbol] = function() {
+    return this;
+  };
+
+  Gp.toString = function() {
+    return "[object Generator]";
+  };
+
+  function pushTryEntry(locs) {
+    var entry = { tryLoc: locs[0] };
+
+    if (1 in locs) {
+      entry.catchLoc = locs[1];
+    }
+
+    if (2 in locs) {
+      entry.finallyLoc = locs[2];
+      entry.afterLoc = locs[3];
+    }
+
+    this.tryEntries.push(entry);
+  }
+
+  function resetTryEntry(entry) {
+    var record = entry.completion || {};
+    record.type = "normal";
+    delete record.arg;
+    entry.completion = record;
+  }
+
+  function Context(tryLocsList) {
+    // The root entry object (effectively a try statement without a catch
+    // or a finally block) gives us a place to store values thrown from
+    // locations where there is no enclosing try statement.
+    this.tryEntries = [{ tryLoc: "root" }];
+    tryLocsList.forEach(pushTryEntry, this);
+    this.reset(true);
+  }
+
+  exports.keys = function(object) {
+    var keys = [];
+    for (var key in object) {
+      keys.push(key);
+    }
+    keys.reverse();
+
+    // Rather than returning an object with a next method, we keep
+    // things simple and return the next function itself.
+    return function next() {
+      while (keys.length) {
+        var key = keys.pop();
+        if (key in object) {
+          next.value = key;
+          next.done = false;
+          return next;
+        }
+      }
+
+      // To avoid creating an additional object, we just hang the .value
+      // and .done properties off the next function object itself. This
+      // also ensures that the minifier will not anonymize the function.
+      next.done = true;
+      return next;
+    };
+  };
+
+  function values(iterable) {
+    if (iterable) {
+      var iteratorMethod = iterable[iteratorSymbol];
+      if (iteratorMethod) {
+        return iteratorMethod.call(iterable);
+      }
+
+      if (typeof iterable.next === "function") {
+        return iterable;
+      }
+
+      if (!isNaN(iterable.length)) {
+        var i = -1, next = function next() {
+          while (++i < iterable.length) {
+            if (hasOwn.call(iterable, i)) {
+              next.value = iterable[i];
+              next.done = false;
+              return next;
+            }
+          }
+
+          next.value = undefined;
+          next.done = true;
+
+          return next;
+        };
+
+        return next.next = next;
+      }
+    }
+
+    // Return an iterator with no values.
+    return { next: doneResult };
+  }
+  exports.values = values;
+
+  function doneResult() {
+    return { value: undefined, done: true };
+  }
+
+  Context.prototype = {
+    constructor: Context,
+
+    reset: function(skipTempReset) {
+      this.prev = 0;
+      this.next = 0;
+      // Resetting context._sent for legacy support of Babel's
+      // function.sent implementation.
+      this.sent = this._sent = undefined;
+      this.done = false;
+      this.delegate = null;
+
+      this.method = "next";
+      this.arg = undefined;
+
+      this.tryEntries.forEach(resetTryEntry);
+
+      if (!skipTempReset) {
+        for (var name in this) {
+          // Not sure about the optimal order of these conditions:
+          if (name.charAt(0) === "t" &&
+              hasOwn.call(this, name) &&
+              !isNaN(+name.slice(1))) {
+            this[name] = undefined;
+          }
+        }
+      }
+    },
+
+    stop: function() {
+      this.done = true;
+
+      var rootEntry = this.tryEntries[0];
+      var rootRecord = rootEntry.completion;
+      if (rootRecord.type === "throw") {
+        throw rootRecord.arg;
+      }
+
+      return this.rval;
+    },
+
+    dispatchException: function(exception) {
+      if (this.done) {
+        throw exception;
+      }
+
+      var context = this;
+      function handle(loc, caught) {
+        record.type = "throw";
+        record.arg = exception;
+        context.next = loc;
+
+        if (caught) {
+          // If the dispatched exception was caught by a catch block,
+          // then let that catch block handle the exception normally.
+          context.method = "next";
+          context.arg = undefined;
+        }
+
+        return !! caught;
+      }
+
+      for (var i = this.tryEntries.length - 1; i >= 0; --i) {
+        var entry = this.tryEntries[i];
+        var record = entry.completion;
+
+        if (entry.tryLoc === "root") {
+          // Exception thrown outside of any try block that could handle
+          // it, so set the completion value of the entire function to
+          // throw the exception.
+          return handle("end");
+        }
+
+        if (entry.tryLoc <= this.prev) {
+          var hasCatch = hasOwn.call(entry, "catchLoc");
+          var hasFinally = hasOwn.call(entry, "finallyLoc");
+
+          if (hasCatch && hasFinally) {
+            if (this.prev < entry.catchLoc) {
+              return handle(entry.catchLoc, true);
+            } else if (this.prev < entry.finallyLoc) {
+              return handle(entry.finallyLoc);
+            }
+
+          } else if (hasCatch) {
+            if (this.prev < entry.catchLoc) {
+              return handle(entry.catchLoc, true);
+            }
+
+          } else if (hasFinally) {
+            if (this.prev < entry.finallyLoc) {
+              return handle(entry.finallyLoc);
+            }
+
+          } else {
+            throw new Error("try statement without catch or finally");
+          }
+        }
+      }
+    },
+
+    abrupt: function(type, arg) {
+      for (var i = this.tryEntries.length - 1; i >= 0; --i) {
+        var entry = this.tryEntries[i];
+        if (entry.tryLoc <= this.prev &&
+            hasOwn.call(entry, "finallyLoc") &&
+            this.prev < entry.finallyLoc) {
+          var finallyEntry = entry;
+          break;
+        }
+      }
+
+      if (finallyEntry &&
+          (type === "break" ||
+           type === "continue") &&
+          finallyEntry.tryLoc <= arg &&
+          arg <= finallyEntry.finallyLoc) {
+        // Ignore the finally entry if control is not jumping to a
+        // location outside the try/catch block.
+        finallyEntry = null;
+      }
+
+      var record = finallyEntry ? finallyEntry.completion : {};
+      record.type = type;
+      record.arg = arg;
+
+      if (finallyEntry) {
+        this.method = "next";
+        this.next = finallyEntry.finallyLoc;
+        return ContinueSentinel;
+      }
+
+      return this.complete(record);
+    },
+
+    complete: function(record, afterLoc) {
+      if (record.type === "throw") {
+        throw record.arg;
+      }
+
+      if (record.type === "break" ||
+          record.type === "continue") {
+        this.next = record.arg;
+      } else if (record.type === "return") {
+        this.rval = this.arg = record.arg;
+        this.method = "return";
+        this.next = "end";
+      } else if (record.type === "normal" && afterLoc) {
+        this.next = afterLoc;
+      }
+
+      return ContinueSentinel;
+    },
+
+    finish: function(finallyLoc) {
+      for (var i = this.tryEntries.length - 1; i >= 0; --i) {
+        var entry = this.tryEntries[i];
+        if (entry.finallyLoc === finallyLoc) {
+          this.complete(entry.completion, entry.afterLoc);
+          resetTryEntry(entry);
+          return ContinueSentinel;
+        }
+      }
+    },
+
+    "catch": function(tryLoc) {
+      for (var i = this.tryEntries.length - 1; i >= 0; --i) {
+        var entry = this.tryEntries[i];
+        if (entry.tryLoc === tryLoc) {
+          var record = entry.completion;
+          if (record.type === "throw") {
+            var thrown = record.arg;
+            resetTryEntry(entry);
+          }
+          return thrown;
+        }
+      }
+
+      // The context.catch method must only be called with a location
+      // argument that corresponds to a known catch block.
+      throw new Error("illegal catch attempt");
+    },
+
+    delegateYield: function(iterable, resultName, nextLoc) {
+      this.delegate = {
+        iterator: values(iterable),
+        resultName: resultName,
+        nextLoc: nextLoc
+      };
+
+      if (this.method === "next") {
+        // Deliberately forget the last sent value so that we don't
+        // accidentally pass it on to the delegate.
+        this.arg = undefined;
+      }
+
+      return ContinueSentinel;
+    }
+  };
+
+  // Regardless of whether this script is executing as a CommonJS module
+  // or not, return the runtime object so that we can declare the variable
+  // regeneratorRuntime in the outer scope, which allows this module to be
+  // injected easily by `bin/regenerator --include-runtime script.js`.
+  return exports;
+
+}(
+  // If this script is executing as a CommonJS module, use module.exports
+  // as the regeneratorRuntime namespace. Otherwise create a new empty
+  // object. Either way, the resulting object will be used to initialize
+  // the regeneratorRuntime variable at the top of this file.
+   true ? module.exports : undefined
+));
+
+try {
+  regeneratorRuntime = runtime;
+} catch (accidentalStrictMode) {
+  // This module should not be running in strict mode, so the above
+  // assignment should always work unless something is misconfigured. Just
+  // in case runtime.js accidentally runs in strict mode, we can escape
+  // strict mode using a global Function call. This could conceivably fail
+  // if a Content Security Policy forbids using Function, but in that case
+  // the proper solution is to fix the accidental strict mode problem. If
+  // you've misconfigured your bundler to force strict mode and applied a
+  // CSP to forbid Function, and you're not willing to fix either of those
+  // problems, please detail your unique predicament in a GitHub issue.
+  Function("r", "regeneratorRuntime = r")(runtime);
+}
+
+
+/***/ }),
+
 /***/ "990b":
 /***/ (function(module, exports, __webpack_require__) {
 
@@ -4160,7 +4896,7 @@ __webpack_require__.r(__webpack_exports__);
 __webpack_require__.d(__webpack_exports__, "GridLayout", function() { return /* reexport */ GridLayout; });
 __webpack_require__.d(__webpack_exports__, "GridItem", function() { return /* reexport */ GridItem; });
 
-// CONCATENATED MODULE: C:/Users/Roberto/Dev/repos/vue-perfect-grid/node_modules/@vue/cli-service/lib/commands/build/setPublicPath.js
+// CONCATENATED MODULE: ./node_modules/@vue/cli-service/lib/commands/build/setPublicPath.js
 // This file is imported into lib/wc client bundles.
 
 if (typeof window !== 'undefined') {
@@ -4193,12 +4929,12 @@ var web_dom_iterable = __webpack_require__("ac6a");
 var external_commonjs_vue_commonjs2_vue_root_Vue_ = __webpack_require__("8bbf");
 var external_commonjs_vue_commonjs2_vue_root_Vue_default = /*#__PURE__*/__webpack_require__.n(external_commonjs_vue_commonjs2_vue_root_Vue_);
 
-// CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js?{"cacheDirectory":"node_modules/.cache/vue-loader","cacheIdentifier":"005c24a2-vue-loader-template"}!./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/GridItem.vue?vue&type=template&id=a7c672ec&
+// CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js?{"cacheDirectory":"node_modules/.cache/vue-loader","cacheIdentifier":"005c24a2-vue-loader-template"}!./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/GridItem.vue?vue&type=template&id=46a061bd&
 var render = function () {var _vm=this;var _h=_vm.$createElement;var _c=_vm._self._c||_h;return _c('div',{ref:"item",staticClass:"vue-grid-item",class:_vm.classObj,style:(_vm.style)},[_vm._t("default"),(_vm.resizableAndNotStatic)?_c('span',{ref:"handle",class:_vm.resizableHandleClass}):_vm._e()],2)}
 var staticRenderFns = []
 
 
-// CONCATENATED MODULE: ./src/components/GridItem.vue?vue&type=template&id=a7c672ec&
+// CONCATENATED MODULE: ./src/components/GridItem.vue?vue&type=template&id=46a061bd&
 
 // EXTERNAL MODULE: ./node_modules/core-js/modules/es6.regexp.match.js
 var es6_regexp_match = __webpack_require__("4917");
@@ -4213,6 +4949,7 @@ var es6_regexp_replace = __webpack_require__("a481");
 var es6_array_sort = __webpack_require__("55dd");
 
 // CONCATENATED MODULE: ./src/helpers/utils.js
+
 
 
 
@@ -5040,6 +5777,10 @@ function removeWindowEventListener(event
 
   window.removeEventListener(event, callback);
 }
+// EXTERNAL MODULE: ./node_modules/interactjs/dist/interact.min.js
+var interact_min = __webpack_require__("5014");
+var interact_min_default = /*#__PURE__*/__webpack_require__.n(interact_min);
+
 // CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js??ref--12-0!./node_modules/thread-loader/dist/cjs.js!./node_modules/babel-loader/lib!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/GridItem.vue?vue&type=script&lang=js&
 
 
@@ -5125,37 +5866,13 @@ function removeWindowEventListener(event
 //
 //
 //
-//
 
 
- //    var eventBus = require('./eventBus');
 
-var interact = __webpack_require__("5014");
 
 /* harmony default export */ var GridItemvue_type_script_lang_js_ = ({
   name: 'GridItem',
   props: {
-    /*cols: {
-               type: Number,
-               required: true
-               },*/
-
-    /*containerWidth: {
-               type: Number,
-               required: true
-                 },
-               rowHeight: {
-               type: Number,
-               required: true
-               },
-               margin: {
-               type: Array,
-               required: true
-               },
-               maxRows: {
-               type: Number,
-               required: true
-               },*/
     isDraggable: {
       type: Boolean,
       required: false,
@@ -5166,12 +5883,6 @@ var interact = __webpack_require__("5014");
       required: false,
       default: null
     },
-
-    /*useCssTransforms: {
-               type: Boolean,
-               required: true
-               },
-               */
     static: {
       type: Boolean,
       required: false,
@@ -5266,70 +5977,30 @@ var interact = __webpack_require__("5014");
     };
   },
   created: function created() {
-    var _this = this;
-
-    var self = this; // Accessible refernces of functions for removing in beforeDestroy
-
-    self.updateWidthHandler = function (width) {
-      self.updateWidth(width);
-    };
-
-    self.compactHandler = function (layout) {
-      self.compact(layout);
-    };
-
-    self.setDraggableHandler = function (isDraggable) {
-      if (self.isDraggable === null) {
-        self.draggable = isDraggable;
-      }
-    };
-
-    self.setResizableHandler = function (isResizable) {
-      if (self.isResizable === null) {
-        self.resizable = isResizable;
-      }
-    };
-
-    self.setRowHeightHandler = function (rowHeight) {
-      self.rowHeight = rowHeight;
-    };
-
-    self.setMaxRowsHandler = function (maxRows) {
-      self.maxRows = maxRows;
-    };
-
-    self.directionchangeHandler = function () {
-      _this.rtl = getDocumentDir() === 'rtl';
-
-      _this.compact();
-    };
-
-    self.setColNum = function (colNum) {
-      self.cols = parseInt(colNum);
-    };
-
-    this.eventBus.$on('updateWidth', self.updateWidthHandler);
-    this.eventBus.$on('compact', self.compactHandler);
-    this.eventBus.$on('setDraggable', self.setDraggableHandler);
-    this.eventBus.$on('setResizable', self.setResizableHandler);
-    this.eventBus.$on('setRowHeight', self.setRowHeightHandler);
-    this.eventBus.$on('setMaxRows', self.setMaxRowsHandler);
-    this.eventBus.$on('directionchange', self.directionchangeHandler);
-    this.eventBus.$on('setColNum', self.setColNum);
+    // TODO Communicate with props instead of EventBus
+    this.eventBus.$on('updateWidth', this.updateWidth);
+    this.eventBus.$on('compact', this.compact);
+    this.eventBus.$on('setDraggable', this.setDraggable);
+    this.eventBus.$on('setResizable', this.setResizable);
+    this.eventBus.$on('setRowHeight', this.setRowHeight);
+    this.eventBus.$on('setMaxRows', this.setMaxRows);
+    this.eventBus.$on('directionchange', this.directionChange);
+    this.eventBus.$on('setColNum', this.setColNum);
     this.rtl = getDocumentDir() === 'rtl';
   },
   beforeDestroy: function beforeDestroy() {
-    var self = this; //Remove listeners
+    // Remove listeners
+    // TODO Communicate with props instead of EventBus
+    this.eventBus.$off('updateWidth', this.updateWidth);
+    this.eventBus.$off('compact', this.compactHandler);
+    this.eventBus.$off('setDraggable', this.setDraggable);
+    this.eventBus.$off('setResizable', this.setResizable);
+    this.eventBus.$off('setRowHeight', this.setRowHeight);
+    this.eventBus.$off('setMaxRows', this.setMaxRows);
+    this.eventBus.$off('directionchange', this.directionChange);
+    this.eventBus.$off('setColNum', this.setColNum); // Destroy interact instance
 
-    this.eventBus.$off('updateWidth', self.updateWidthHandler);
-    this.eventBus.$off('compact', self.compactHandler);
-    this.eventBus.$off('setDraggable', self.setDraggableHandler);
-    this.eventBus.$off('setResizable', self.setResizableHandler);
-    this.eventBus.$off('setRowHeight', self.setRowHeightHandler);
-    this.eventBus.$off('setMaxRows', self.setMaxRowsHandler);
-    this.eventBus.$off('directionchange', self.directionchangeHandler);
-    this.eventBus.$off('setColNum', self.setColNum);
-    this.interactObj.unset(); // destroy interact intance
+    this.interactObj.unset();
   },
   mounted: function mounted() {
     this.cols = this.$parent.colNum;
@@ -5394,11 +6065,11 @@ var interact = __webpack_require__("5014");
     },
     h: function h(newVal) {
       this.innerH = newVal;
-      this.createStyle(); // this.emitContainerResized();
+      this.createStyle();
     },
     w: function w(newVal) {
       this.innerW = newVal;
-      this.createStyle(); // this.emitContainerResized();
+      this.createStyle();
     },
     renderRtl: function renderRtl() {
       // console.log("### renderRtl");
@@ -5464,7 +6135,7 @@ var interact = __webpack_require__("5014");
       var pos = this.calcPosition(this.innerX, this.innerY, this.innerW, this.innerH);
 
       if (this.isDragging) {
-        pos.top = this.dragging.top; //                    Add rtl support
+        pos.top = this.dragging.top; // Add rtl support
 
         if (this.renderRtl) {
           pos.right = this.dragging.left;
@@ -5481,7 +6152,7 @@ var interact = __webpack_require__("5014");
       var style; // CSS Transforms support (default)
 
       if (this.useCssTransforms) {
-        //                    Add rtl support
+        // Add rtl support
         if (this.renderRtl) {
           style = setTransformRtl(pos.top, pos.right, pos.width, pos.height);
         } else {
@@ -5489,7 +6160,7 @@ var interact = __webpack_require__("5014");
         }
       } else {
         // top,left (slow)
-        //                    Add rtl support
+        // Add rtl support
         if (this.renderRtl) {
           style = setTopRight(pos.top, pos.right, pos.width, pos.height);
         } else {
@@ -5510,7 +6181,8 @@ var interact = __webpack_require__("5014");
         var matches = val.match(/^(\d+)px$/);
         if (!matches) return;
         styleProps[prop] = matches[1];
-      }
+      } // * Core Event
+
 
       this.$emit('container-resized', this.i, this.h, this.w, styleProps.height, styleProps.width);
     },
@@ -5543,7 +6215,7 @@ var interact = __webpack_require__("5014");
 
         case 'resizemove':
           {
-            //                        console.log("### resize => " + event.type + ", lastW=" + this.lastW + ", lastH=" + this.lastH);
+            // console.log("### resize => " + event.type + ", lastW=" + this.lastW + ", lastH=" + this.lastH);
             var coreEvent = createCoreData(this.lastW, this.lastH, x, y);
 
             if (this.renderRtl) {
@@ -5552,7 +6224,7 @@ var interact = __webpack_require__("5014");
               newSize.width = this.resizing.width + coreEvent.deltaX;
             }
 
-            newSize.height = this.resizing.height + coreEvent.deltaY; ///console.log("### resize => " + event.type + ", deltaX=" + coreEvent.deltaX + ", deltaY=" + coreEvent.deltaY);
+            newSize.height = this.resizing.height + coreEvent.deltaY; // console.log("### resize => " + event.type + ", deltaX=" + coreEvent.deltaX + ", deltaY=" + coreEvent.deltaY);
 
             this.resizing = newSize;
             break;
@@ -5560,10 +6232,10 @@ var interact = __webpack_require__("5014");
 
         case 'resizeend':
           {
-            //console.log("### resize end => x=" +this.innerX + " y=" + this.innerY + " w=" + this.innerW + " h=" + this.innerH);
+            // console.log("### resize end => x=" +this.innerX + " y=" + this.innerY + " w=" + this.innerW + " h=" + this.innerH);
             pos = this.calcPosition(this.innerX, this.innerY, this.innerW, this.innerH);
             newSize.width = pos.width;
-            newSize.height = pos.height; //                        console.log("### resize end => " + JSON.stringify(newSize));
+            newSize.height = pos.height; // console.log("### resize end => " + JSON.stringify(newSize));
 
             this.resizing = null;
             this.isResizing = false;
@@ -5602,10 +6274,12 @@ var interact = __webpack_require__("5014");
       this.lastH = y;
 
       if (this.innerW !== pos.w || this.innerH !== pos.h) {
+        // * Core Event
         this.$emit('resize', this.i, pos.h, pos.w, newSize.height, newSize.width);
       }
 
       if (event.type === 'resizeend' && (this.previousW !== this.innerW || this.previousH !== this.innerH)) {
+        // * Core Event
         this.$emit('resized', this.i, pos.h, pos.w, newSize.height, newSize.width);
       }
 
@@ -5652,7 +6326,7 @@ var interact = __webpack_require__("5014");
 
             var _parentRect = event.target.offsetParent.getBoundingClientRect();
 
-            var _clientRect = event.target.getBoundingClientRect(); //                        Add rtl support
+            var _clientRect = event.target.getBoundingClientRect(); // Add rtl support
 
 
             if (this.renderRtl) {
@@ -5661,8 +6335,8 @@ var interact = __webpack_require__("5014");
               newPosition.left = _clientRect.left - _parentRect.left;
             }
 
-            newPosition.top = _clientRect.top - _parentRect.top; //                        console.log("### drag end => " + JSON.stringify(newPosition));
-            //                        console.log("### DROP: " + JSON.stringify(newPosition));
+            newPosition.top = _clientRect.top - _parentRect.top; // console.log("### drag end => " + JSON.stringify(newPosition));
+            // console.log("### DROP: " + JSON.stringify(newPosition));
 
             this.dragging = null;
             this.isDragging = false; // shouldUpdate = true;
@@ -5672,7 +6346,7 @@ var interact = __webpack_require__("5014");
 
         case 'dragmove':
           {
-            var coreEvent = createCoreData(this.lastX, this.lastY, x, y); //                        Add rtl support
+            var coreEvent = createCoreData(this.lastX, this.lastY, x, y); // Add rtl support
 
             if (this.renderRtl) {
               newPosition.left = this.dragging.left - coreEvent.deltaX;
@@ -5680,9 +6354,9 @@ var interact = __webpack_require__("5014");
               newPosition.left = this.dragging.left + coreEvent.deltaX;
             }
 
-            newPosition.top = this.dragging.top + coreEvent.deltaY; //                        console.log("### drag => " + event.type + ", x=" + x + ", y=" + y);
-            //                        console.log("### drag => " + event.type + ", deltaX=" + coreEvent.deltaX + ", deltaY=" + coreEvent.deltaY);
-            //                        console.log("### drag end => " + JSON.stringify(newPosition));
+            newPosition.top = this.dragging.top + coreEvent.deltaY; // console.log("### drag => " + event.type + ", x=" + x + ", y=" + y);
+            // console.log("### drag => " + event.type + ", deltaX=" + coreEvent.deltaX + ", deltaY=" + coreEvent.deltaY);
+            // console.log("### drag end => " + JSON.stringify(newPosition));
 
             this.dragging = newPosition;
             break;
@@ -5702,10 +6376,12 @@ var interact = __webpack_require__("5014");
       this.lastY = y;
 
       if (this.innerX !== pos.x || this.innerY !== pos.y) {
+        // * Core Event
         this.$emit('move', this.i, pos.x, pos.y);
       }
 
       if (event.type === 'dragend' && (this.previousX !== this.innerX || this.previousY !== this.innerY)) {
+        // * Core Event
         this.$emit('moved', this.i, pos.x, pos.y);
       }
 
@@ -5805,11 +6481,32 @@ var interact = __webpack_require__("5014");
     compact: function compact() {
       this.createStyle();
     },
+    setDraggable: function setDraggable(isDraggable) {
+      if (this.isDraggable !== null) return;
+      this.draggable = isDraggable;
+    },
+    setResizable: function setResizable(isResizable) {
+      if (this.isResizable !== null) return;
+      this.resizable = isResizable;
+    },
+    setRowHeight: function setRowHeight(rowHeight) {
+      this.rowHeight = rowHeight;
+    },
+    setMaxRows: function setMaxRows(maxRows) {
+      this.maxRows = maxRows;
+    },
+    directionChange: function directionChange() {
+      this.rtl = getDocumentDir() === 'rtl';
+      this.compact();
+    },
+    setColNum: function setColNum(colNum) {
+      this.cols = parseInt(colNum);
+    },
     tryMakeDraggable: function tryMakeDraggable() {
-      var self = this;
+      var _this = this;
 
       if (this.interactObj === null || this.interactObj === undefined) {
-        this.interactObj = interact(this.$refs.item);
+        this.interactObj = interact_min_default()(this.$refs.item);
       }
 
       if (this.draggable && !this.static) {
@@ -5823,7 +6520,7 @@ var interact = __webpack_require__("5014");
         if (!this.dragEventSet) {
           this.dragEventSet = true;
           this.interactObj.on('dragstart dragmove dragend', function (event) {
-            self.handleDrag(event);
+            _this.handleDrag(event);
           });
         }
       } else {
@@ -5833,10 +6530,10 @@ var interact = __webpack_require__("5014");
       }
     },
     tryMakeResizable: function tryMakeResizable() {
-      var self = this;
+      var _this2 = this;
 
       if (this.interactObj === null || this.interactObj === undefined) {
-        this.interactObj = interact(this.$refs.item);
+        this.interactObj = interact_min_default()(this.$refs.item);
       }
 
       if (this.resizable && !this.static) {
@@ -5870,7 +6567,7 @@ var interact = __webpack_require__("5014");
         if (!this.resizeEventSet) {
           this.resizeEventSet = true;
           this.interactObj.on('resizestart resizemove resizeend', function (event) {
-            self.handleResize(event);
+            _this2.handleResize(event);
           });
         }
       } else {
@@ -5880,7 +6577,7 @@ var interact = __webpack_require__("5014");
       }
     },
     autoSize: function autoSize() {
-      // ok here we want to calculate if a resize is needed
+      // We want to calculate if a resize is needed
       this.previousW = this.innerW;
       this.previousH = this.innerH;
       var newSize = this.$slots.default[0].elm.getBoundingClientRect();
@@ -5913,10 +6610,12 @@ var interact = __webpack_require__("5014");
 
 
       if (this.innerW !== pos.w || this.innerH !== pos.h) {
+        // * Core Event
         this.$emit('resize', this.i, pos.h, pos.w, newSize.height, newSize.width);
       }
 
       if (this.previousW !== pos.w || this.previousH !== pos.h) {
+        // * Core Event
         this.$emit('resized', this.i, pos.h, pos.w, newSize.height, newSize.width);
         this.eventBus.$emit('resizeEvent', 'resizeend', this.i, this.innerX, this.innerY, pos.h, pos.w);
       }
@@ -6049,12 +6748,12 @@ var component = normalizeComponent(
 )
 
 /* harmony default export */ var GridItem = (component.exports);
-// CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js?{"cacheDirectory":"node_modules/.cache/vue-loader","cacheIdentifier":"005c24a2-vue-loader-template"}!./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/GridLayout.vue?vue&type=template&id=905a6486&
-var GridLayoutvue_type_template_id_905a6486_render = function () {var _vm=this;var _h=_vm.$createElement;var _c=_vm._self._c||_h;return _c('div',{ref:"item",staticClass:"vue-grid-layout",style:(_vm.mergedStyle)},[_vm._t("default"),_c('grid-item',{directives:[{name:"show",rawName:"v-show",value:(_vm.isDragging),expression:"isDragging"}],staticClass:"vue-grid-placeholder",attrs:{"x":_vm.placeholder.x,"y":_vm.placeholder.y,"w":_vm.placeholder.w,"h":_vm.placeholder.h,"i":_vm.placeholder.i}})],2)}
-var GridLayoutvue_type_template_id_905a6486_staticRenderFns = []
+// CONCATENATED MODULE: ./node_modules/cache-loader/dist/cjs.js?{"cacheDirectory":"node_modules/.cache/vue-loader","cacheIdentifier":"005c24a2-vue-loader-template"}!./node_modules/vue-loader/lib/loaders/templateLoader.js??vue-loader-options!./node_modules/cache-loader/dist/cjs.js??ref--0-0!./node_modules/vue-loader/lib??vue-loader-options!./src/components/GridLayout.vue?vue&type=template&id=10e2ef21&
+var GridLayoutvue_type_template_id_10e2ef21_render = function () {var _vm=this;var _h=_vm.$createElement;var _c=_vm._self._c||_h;return _c('div',{ref:"item",staticClass:"vue-grid-layout",style:(_vm.mergedStyle)},[_vm._t("default"),_c('grid-item',{directives:[{name:"show",rawName:"v-show",value:(_vm.isDragging),expression:"isDragging"}],staticClass:"vue-grid-placeholder",attrs:{"x":_vm.placeholder.x,"y":_vm.placeholder.y,"w":_vm.placeholder.w,"h":_vm.placeholder.h,"i":_vm.placeholder.i}})],2)}
+var GridLayoutvue_type_template_id_10e2ef21_staticRenderFns = []
 
 
-// CONCATENATED MODULE: ./src/components/GridLayout.vue?vue&type=template&id=905a6486&
+// CONCATENATED MODULE: ./src/components/GridLayout.vue?vue&type=template&id=10e2ef21&
 
 // EXTERNAL MODULE: ./node_modules/core-js/modules/es7.object.get-own-property-descriptors.js
 var es7_object_get_own_property_descriptors = __webpack_require__("8e6e");
@@ -6077,7 +6776,51 @@ function _defineProperty(obj, key, value) {
 
   return obj;
 }
+// EXTERNAL MODULE: ./node_modules/regenerator-runtime/runtime.js
+var runtime = __webpack_require__("96cf");
+
+// CONCATENATED MODULE: ./node_modules/@babel/runtime/helpers/esm/asyncToGenerator.js
+function asyncGeneratorStep(gen, resolve, reject, _next, _throw, key, arg) {
+  try {
+    var info = gen[key](arg);
+    var value = info.value;
+  } catch (error) {
+    reject(error);
+    return;
+  }
+
+  if (info.done) {
+    resolve(value);
+  } else {
+    Promise.resolve(value).then(_next, _throw);
+  }
+}
+
+function _asyncToGenerator(fn) {
+  return function () {
+    var self = this,
+        args = arguments;
+    return new Promise(function (resolve, reject) {
+      var gen = fn.apply(self, args);
+
+      function _next(value) {
+        asyncGeneratorStep(gen, resolve, reject, _next, _throw, "next", value);
+      }
+
+      function _throw(err) {
+        asyncGeneratorStep(gen, resolve, reject, _next, _throw, "throw", err);
+      }
+
+      _next(undefined);
+    });
+  };
+}
+// EXTERNAL MODULE: ./node_modules/element-resize-detector/src/element-resize-detector.js
+var element_resize_detector = __webpack_require__("eec4");
+var element_resize_detector_default = /*#__PURE__*/__webpack_require__.n(element_resize_detector);
+
 // CONCATENATED MODULE: ./src/helpers/responsiveUtils.js
+
 
 
 
@@ -6256,6 +6999,9 @@ function sortBreakpoints(breakpoints
 
 
 
+
+
+
 function ownKeys(object, enumerableOnly) { var keys = Object.keys(object); if (Object.getOwnPropertySymbols) { var symbols = Object.getOwnPropertySymbols(object); if (enumerableOnly) symbols = symbols.filter(function (sym) { return Object.getOwnPropertyDescriptor(object, sym).enumerable; }); keys.push.apply(keys, symbols); } return keys; }
 
 function _objectSpread(target) { for (var i = 1; i < arguments.length; i++) { var source = arguments[i] != null ? arguments[i] : {}; if (i % 2) { ownKeys(Object(source), true).forEach(function (key) { _defineProperty(target, key, source[key]); }); } else if (Object.getOwnPropertyDescriptors) { Object.defineProperties(target, Object.getOwnPropertyDescriptors(source)); } else { ownKeys(Object(source)).forEach(function (key) { Object.defineProperty(target, key, Object.getOwnPropertyDescriptor(source, key)); }); } } return target; }
@@ -6282,10 +7028,7 @@ function _objectSpread(target) { for (var i = 1; i < arguments.length; i++) { va
 //
 
 
-var elementResizeDetectorMaker = __webpack_require__("eec4");
 
-
- //var eventBus = require('./eventBus');
 
 
 
@@ -6402,97 +7145,147 @@ var elementResizeDetectorMaker = __webpack_require__("eec4");
     };
   },
   created: function created() {
-    var self = this; // Accessible refernces of functions for removing in beforeDestroy
+    // TODO Communicate with props instead of EventBus
+    this._provided.eventBus = new external_commonjs_vue_commonjs2_vue_root_Vue_default.a();
+    this.eventBus = this._provided.eventBus;
+    this.eventBus.$on('resizeEvent', this.resizeEvent);
+    this.eventBus.$on('dragEvent', this.dragEvent); // * Core Event
 
-    self.resizeEventHandler = function (eventType, i, x, y, h, w) {
-      self.resizeEvent(eventType, i, x, y, h, w);
-    };
-
-    self.dragEventHandler = function (eventType, i, x, y, h, w) {
-      self.dragEvent(eventType, i, x, y, h, w);
-    };
-
-    self._provided.eventBus = new external_commonjs_vue_commonjs2_vue_root_Vue_default.a();
-    self.eventBus = self._provided.eventBus;
-    self.eventBus.$on('resizeEvent', self.resizeEventHandler);
-    self.eventBus.$on('dragEvent', self.dragEventHandler);
-    self.$emit('layout-created', self.layout);
+    this.$emit('layout-created', this.layout);
   },
   beforeDestroy: function beforeDestroy() {
-    //Remove listeners
-    this.eventBus.$off('resizeEvent', this.resizeEventHandler);
-    this.eventBus.$off('dragEvent', this.dragEventHandler);
+    // * Core Event
+    this.$emit('layout-before-destroy', this.layout); // Remove listeners
+    // TODO Communicate with props instead of EventBus
+
+    this.eventBus.$off('resizeEvent', this.resizeEvent);
+    this.eventBus.$off('dragEvent', this.dragEvent);
     this.eventBus.$destroy();
     removeWindowEventListener('resize', this.onWindowResize);
     this.erd.uninstall(this.$refs.item);
   },
   beforeMount: function beforeMount() {
+    // * Core Event
     this.$emit('layout-before-mount', this.layout);
   },
-  mounted: function mounted() {
-    this.$emit('layout-mounted', this.layout);
-    this.$nextTick(function () {
-      validateLayout(this.layout);
-      this.originalLayout = this.layout;
-      var self = this;
-      this.$nextTick(function () {
-        self.onWindowResize();
-        self.initResponsiveFeatures(); //self.width = self.$el.offsetWidth;
+  mounted: function () {
+    var _mounted = _asyncToGenerator( /*#__PURE__*/regeneratorRuntime.mark(function _callee() {
+      var _this = this;
 
-        addWindowEventListener('resize', self.onWindowResize);
-        compact(self.layout, self.verticalCompact);
-        self.updateHeight();
-        self.$nextTick(function () {
-          this.erd = elementResizeDetectorMaker({
-            strategy: 'scroll',
-            //<- For ultra performance.
-            // See https://github.com/wnr/element-resize-detector/issues/110 about callOnAdd.
-            callOnAdd: false
-          });
-          this.erd.listenTo(self.$refs.item, function () {
-            self.onWindowResize();
-          });
-        });
-      });
-    });
-  },
-  watch: {
-    width: function width(newval, oldval) {
-      var self = this;
-      this.$nextTick(function () {
-        var _this = this;
+      return regeneratorRuntime.wrap(function _callee$(_context) {
+        while (1) {
+          switch (_context.prev = _context.next) {
+            case 0:
+              // * Core Event
+              this.$emit('layout-mounted', this.layout);
+              _context.next = 3;
+              return this.$nextTick();
 
-        //this.$broadcast("updateWidth", this.width);
-        this.eventBus.$emit('updateWidth', this.width);
+            case 3:
+              validateLayout(this.layout);
+              this.originalLayout = this.layout;
+              _context.next = 7;
+              return this.$nextTick();
 
-        if (oldval === null) {
-          /*
-                                 If oldval == null is when the width has never been
-                                 set before. That only occurs when mouting is
-                                 finished, and onWindowResize has been called and
-                                 this.width has been changed the first time after it
-                                 got set to null in the constructor. It is now time
-                                 to issue layout-ready events as the GridItems have
-                                 their sizes configured properly.
-                                   The reason for emitting the layout-ready events on
-                                 the next tick is to allow for the newly-emitted
-                                 updateWidth event (above) to have reached the
-                                 children GridItem-s and had their effect, so we're
-                                 sure that they have the final size before we emit
-                                 layout-ready (for this GridLayout) and
-                                 item-layout-ready (for the GridItem-s).
-                                   This way any client event handlers can reliably
-                                 invistigate stable sizes of GridItem-s.
-                             */
-          this.$nextTick(function () {
-            _this.$emit('layout-ready', self.layout);
-          });
+            case 7:
+              this.onWindowResize();
+              this.initResponsiveFeatures(); // this.width = this.$el.offsetWidth;
+
+              addWindowEventListener('resize', this.onWindowResize);
+              compact(this.layout, this.verticalCompact);
+              this.updateHeight();
+              _context.next = 14;
+              return this.$nextTick();
+
+            case 14:
+              // ERD Initialization
+              this.erd = element_resize_detector_default()({
+                strategy: 'scroll',
+                //<- For ultra performance.
+                // See https://github.com/wnr/element-resize-detector/issues/110 about callOnAdd.
+                callOnAdd: false
+              });
+              this.erd.listenTo(this.$refs.item, function () {
+                _this.onWindowResize();
+              });
+
+            case 16:
+            case "end":
+              return _context.stop();
+          }
         }
+      }, _callee, this);
+    }));
 
-        this.updateHeight();
-      });
-    },
+    function mounted() {
+      return _mounted.apply(this, arguments);
+    }
+
+    return mounted;
+  }(),
+  watch: {
+    width: function () {
+      var _width = _asyncToGenerator( /*#__PURE__*/regeneratorRuntime.mark(function _callee2(newVal, oldVal) {
+        return regeneratorRuntime.wrap(function _callee2$(_context2) {
+          while (1) {
+            switch (_context2.prev = _context2.next) {
+              case 0:
+                _context2.next = 2;
+                return this.$nextTick();
+
+              case 2:
+                this.eventBus.$emit('updateWidth', this.width);
+                this.updateHeight();
+                /*
+                	oldVal === null is when the width has never been
+                	set before. That only occurs when mounting is
+                	finished, and onWindowResize has been called and
+                	this.width has been changed the first time after it
+                	got set to null in the constructor. It is now time
+                	to issue layout-ready events as the GridItem-s have
+                	their sizes configured properly.
+                			The reason for emitting the layout-ready event on
+                	the next tick is to allow for the newly-emitted
+                	updateWidth event (above) to have reached the
+                	children GridItem-s and had their effect, so we're
+                	sure that they have the final size before we emit
+                	layout-ready (for this GridLayout) and
+                	item-layout-ready (for the GridItem-s).
+                			This way any client event handlers can reliably
+                	invistigate stable sizes of GridItem-s.
+                */
+
+                if (!(oldVal !== null)) {
+                  _context2.next = 6;
+                  break;
+                }
+
+                return _context2.abrupt("return");
+
+              case 6:
+                _context2.next = 8;
+                return this.$nextTick();
+
+              case 8:
+                // * Core Event
+                this.$emit('layout-ready', this.layout);
+
+              case 9:
+              case "end":
+                return _context2.stop();
+            }
+          }
+        }, _callee2, this);
+      }));
+
+      function width(_x, _x2) {
+        return _width.apply(this, arguments);
+      }
+
+      return width;
+    }(),
     layout: function layout() {
+      // ? Insert this in the core API?
       this.layoutUpdate();
     },
     colNum: function colNum(val) {
@@ -6509,6 +7302,7 @@ var elementResizeDetectorMaker = __webpack_require__("eec4");
     },
     responsive: function responsive() {
       if (!this.responsive) {
+        // ? Core Event?
         this.$emit('update:layout', this.originalLayout);
         this.eventBus.$emit('setColNum', this.colNum);
       }
@@ -6521,32 +7315,32 @@ var elementResizeDetectorMaker = __webpack_require__("eec4");
   },
   methods: {
     layoutUpdate: function layoutUpdate() {
-      if (this.layout !== undefined && this.originalLayout !== null) {
-        if (this.layout.length !== this.originalLayout.length) {
-          // console.log("### LAYOUT UPDATE!", this.layout.length, this.originalLayout.length);
-          var diff = this.findDifference(this.layout, this.originalLayout);
+      if (this.layout === undefined || this.originalLayout === null) return;
+      console.log('### LAYOUT UPDATE!', this.layout.length, this.originalLayout.length);
 
-          if (diff.length > 0) {
-            // console.log(diff);
-            if (this.layout.length > this.originalLayout.length) {
-              this.originalLayout = this.originalLayout.concat(diff);
-            } else {
-              this.originalLayout = this.originalLayout.filter(function (obj) {
-                return !diff.some(function (obj2) {
-                  return obj.i === obj2.i;
-                });
+      if (this.layout.length !== this.originalLayout.length) {
+        var diff = this.findDifference(this.layout, this.originalLayout);
+
+        if (diff.length > 0) {
+          // console.log(diff);
+          if (this.layout.length > this.originalLayout.length) {
+            this.originalLayout = this.originalLayout.concat(diff);
+          } else {
+            this.originalLayout = this.originalLayout.filter(function (obj) {
+              return !diff.some(function (obj2) {
+                return obj.i === obj2.i;
               });
-            }
+            });
           }
-
-          this.lastLayoutLength = this.layout.length;
-          this.initResponsiveFeatures();
         }
 
-        compact(this.layout, this.verticalCompact);
-        this.eventBus.$emit('updateWidth', this.width);
-        this.updateHeight();
+        this.lastLayoutLength = this.layout.length;
+        this.initResponsiveFeatures();
       }
+
+      compact(this.layout, this.verticalCompact);
+      this.eventBus.$emit('updateWidth', this.width);
+      this.updateHeight();
     },
     updateHeight: function updateHeight() {
       this.mergedStyle = {
@@ -6565,8 +7359,10 @@ var elementResizeDetectorMaker = __webpack_require__("eec4");
       return bottom(this.layout) * (this.rowHeight + this.margin[1]) + this.margin[1] + 'px';
     },
     dragEvent: function dragEvent(eventName, id, x, y, h, w) {
-      //console.log(eventName + " id=" + id + ", x=" + x + ", y=" + y);
-      var l = getLayoutItem(this.layout, id); //GetLayoutItem sometimes returns null object
+      var _this2 = this;
+
+      // console.log(eventName + " id=" + id + ", x=" + x + ", y=" + y);
+      var l = getLayoutItem(this.layout, id); // GetLayoutItem sometimes returns null object
 
       if (l === undefined || l === null) {
         l = {
@@ -6582,13 +7378,12 @@ var elementResizeDetectorMaker = __webpack_require__("eec4");
         this.placeholder.w = w;
         this.placeholder.h = h;
         this.$nextTick(function () {
-          this.isDragging = true;
-        }); //this.$broadcast("updateWidth", this.width);
-
+          _this2.isDragging = true;
+        });
         this.eventBus.$emit('updateWidth', this.width);
       } else {
         this.$nextTick(function () {
-          this.isDragging = false;
+          _this2.isDragging = false;
         });
       } // Move the element to the dragged location.
 
@@ -6598,10 +7393,13 @@ var elementResizeDetectorMaker = __webpack_require__("eec4");
 
       this.eventBus.$emit('compact');
       this.updateHeight();
-      if (eventName === 'dragend') this.$emit('layout-updated', this.layout);
+
+      if (eventName === 'dragend') {
+        this.$emit('layout-updated', this.layout);
+      }
     },
     resizeEvent: function resizeEvent(eventName, id, x, y, h, w) {
-      var l = getLayoutItem(this.layout, id); //GetLayoutItem sometimes return null object
+      var l = getLayoutItem(this.layout, id); // GetLayoutItem sometimes return null object
 
       if (l === undefined || l === null) {
         l = {
@@ -6648,8 +7446,7 @@ var elementResizeDetectorMaker = __webpack_require__("eec4");
         this.placeholder.h = l.h;
         this.$nextTick(function () {
           this.isDragging = true;
-        }); //this.$broadcast("updateWidth", this.width);
-
+        });
         this.eventBus.$emit('updateWidth', this.width);
       } else {
         this.$nextTick(function () {
@@ -6661,18 +7458,25 @@ var elementResizeDetectorMaker = __webpack_require__("eec4");
       compact(this.layout, this.verticalCompact);
       this.eventBus.$emit('compact');
       this.updateHeight();
-      if (eventName === 'resizeend') this.$emit('layout-updated', this.layout);
+
+      if (eventName === 'resizeend') {
+        // * Core Event
+        this.$emit('layout-updated', this.layout);
+      }
     },
     // finds or generates new layouts for set breakpoints
     responsiveGridLayout: function responsiveGridLayout() {
       var newBreakpoint = getBreakpointFromWidth(this.breakpoints, this.width);
       var newCols = getColsFromBreakpoint(newBreakpoint, this.cols); // save actual layout in layouts
 
-      if (this.lastBreakpoint != null && !this.layouts[this.lastBreakpoint]) this.layouts[this.lastBreakpoint] = cloneLayout(this.layout); // Find or generate a new layout.
+      if (this.lastBreakpoint != null && !this.layouts[this.lastBreakpoint]) {
+        this.layouts[this.lastBreakpoint] = cloneLayout(this.layout);
+      } // Find or generate a new layout.
+
 
       var layout = findOrGenerateResponsiveLayout(this.originalLayout, this.layouts, this.breakpoints, newBreakpoint, this.lastBreakpoint, newCols, this.verticalCompact); // Store the new layout.
 
-      this.layouts[newBreakpoint] = layout; // new prop sync
+      this.layouts[newBreakpoint] = layout; // Needed to keep updated the layout prop (that is passed with .sync)
 
       this.$emit('update:layout', layout);
       this.lastBreakpoint = newBreakpoint;
@@ -6685,18 +7489,18 @@ var elementResizeDetectorMaker = __webpack_require__("eec4");
     },
     // find difference in layouts
     findDifference: function findDifference(layout, originalLayout) {
-      //Find values that are in result1 but not in result2
+      // Find values that are in result1 but not in result2
       var uniqueResultOne = layout.filter(function (obj) {
         return !originalLayout.some(function (obj2) {
           return obj.i === obj2.i;
         });
-      }); //Find values that are in result2 but not in result1
+      }); // Find values that are in result2 but not in result1
 
       var uniqueResultTwo = originalLayout.filter(function (obj) {
         return !layout.some(function (obj2) {
           return obj.i === obj2.i;
         });
-      }); //Combine the two arrays of unique entries#
+      }); // Combine the two arrays of unique entries#
 
       return uniqueResultOne.concat(uniqueResultTwo);
     }
@@ -6718,8 +7522,8 @@ var GridLayoutvue_type_style_index_0_lang_css_ = __webpack_require__("e279");
 
 var GridLayout_component = normalizeComponent(
   components_GridLayoutvue_type_script_lang_js_,
-  GridLayoutvue_type_template_id_905a6486_render,
-  GridLayoutvue_type_template_id_905a6486_staticRenderFns,
+  GridLayoutvue_type_template_id_10e2ef21_render,
+  GridLayoutvue_type_template_id_10e2ef21_staticRenderFns,
   false,
   null,
   null,
@@ -6748,7 +7552,7 @@ Object.keys(VuePerfectGrid).forEach(function (name) {
 });
 /* harmony default export */ var components = (VuePerfectGrid);
 
-// CONCATENATED MODULE: C:/Users/Roberto/Dev/repos/vue-perfect-grid/node_modules/@vue/cli-service/lib/commands/build/entry-lib.js
+// CONCATENATED MODULE: ./node_modules/@vue/cli-service/lib/commands/build/entry-lib.js
 
 
 /* harmony default export */ var entry_lib = __webpack_exports__["default"] = (components);
