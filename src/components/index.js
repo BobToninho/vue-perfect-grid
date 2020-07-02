@@ -1,20 +1,19 @@
-import Vue from "vue";
-import GridItem from './GridItem.vue';
-import GridLayout from './GridLayout.vue';
+import Vue from 'vue'
+import GridItem from './GridItem.vue'
+import GridLayout from './GridLayout.vue'
 // import ResponsiveGridLayout from './ResponsiveGridLayout.vue';
 
-
-const VueGridLayout = {
-    // ResponsiveGridLayout,
-    GridLayout,
-    GridItem
+const VuePerfectGrid = {
+	// ResponsiveGridLayout,
+	GridLayout,
+	GridItem
 }
 
 // module.exports = VueGridLayout;
 
-Object.keys(VueGridLayout).forEach(name => {
-    Vue.component(name, VueGridLayout[name]);
-});
+Object.keys(VuePerfectGrid).forEach(name => {
+	Vue.component(name, VuePerfectGrid[name])
+})
 
-export default VueGridLayout;
-export { GridLayout, GridItem };
+export default VuePerfectGrid
+export { GridLayout, GridItem }
